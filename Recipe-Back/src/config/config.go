@@ -13,16 +13,26 @@ type Config struct {
 	Port              string
 	ClaudeModel       string
 	CacheEnabled      bool
+	Debug             bool
 }
 
 func Load() (*Config, error) {
+	debug := false
+	if v := os.Getenv("DEBUG"); v != "" {
+		var err error
+		debug, err = strconv.ParseBool(v)
+		if err != nil {
+			return nil, fmt.Errorf("DEBUG must be true or false: %w", err)
+		}
+	}
+
 	apiKey := os.Getenv("ANTHROPIC_API_KEY")
-	if apiKey == "" {
+	if apiKey == "" && !debug {
 		return nil, fmt.Errorf("ANTHROPIC_API_KEY is required")
 	}
 
 	fridgeURL := os.Getenv("FRIDGE_API_BASE_URL")
-	if fridgeURL == "" {
+	if fridgeURL == "" && !debug {
 		return nil, fmt.Errorf("FRIDGE_API_BASE_URL is required")
 	}
 
@@ -57,5 +67,6 @@ func Load() (*Config, error) {
 		Port:              port,
 		ClaudeModel:       model,
 		CacheEnabled:      cacheEnabled,
+		Debug:             debug,
 	}, nil
 }

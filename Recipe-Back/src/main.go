@@ -9,6 +9,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/joho/godotenv"
+
 	"github.com/social-system-group2/recipe-back/src/ai"
 	"github.com/social-system-group2/recipe-back/src/api"
 	"github.com/social-system-group2/recipe-back/src/config"
@@ -19,6 +21,11 @@ import (
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 
+	// .env ファイルが存在すれば読み込む（なくてもエラーにしない）
+	if err := godotenv.Load(); err != nil && !os.IsNotExist(err) {
+		slog.Warn(".env file not found, using environment variables only")
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Error("config load failed", "error", err)
@@ -27,7 +34,14 @@ func main() {
 
 	fridgeClient := fridge.NewHTTPClient(cfg.FridgeAPIBaseURL)
 	userStore := user.NewFileStore(cfg.UserPrefsFilePath)
-	aiClient := ai.NewAnthropicClient(cfg.AnthropicAPIKey, cfg.ClaudeModel, cfg.CacheEnabled)
+
+	var aiClient ai.Client
+	if cfg.Debug && cfg.AnthropicAPIKey == "" {
+		slog.Warn("DEBUG mode: using stub AI client")
+		aiClient = ai.NewStubClient()
+	} else {
+		aiClient = ai.NewAnthropicClient(cfg.AnthropicAPIKey, cfg.ClaudeModel, cfg.CacheEnabled)
+	}
 
 	recipeHandler := api.NewRecipeHandler(aiClient, fridgeClient, userStore)
 	prefsHandler := api.NewPreferencesHandler(userStore)
