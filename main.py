@@ -25,7 +25,6 @@ SCHEMA = {
     "type": "object",
     "properties": {
         "receipt_total": {"type": ["integer", "null"]},
-        "receipt_date": {"type": ["integer", "null"]},
         "items": {
             "type": "array",
             "items": {
@@ -42,14 +41,13 @@ SCHEMA = {
             }
         }
     },
-    "required": ["receipt_total", "receipt_date", "items"]
+    "required": ["receipt_total", "items"]
 }
 
 # JSON形式の例
 """
     {
     "receipt_total": 1234,
-    "receipt_date": 20260428,
     "items": [
         {
         "item": "商品名",
@@ -70,9 +68,8 @@ PROMPT = """
 必ず指定のJSONだけを返してください。
 説明文は不要です。
 
-トップレベルには receipt_total, receipt_date, items を入れてください。
+トップレベルには receipt_total, items を入れてください。
 receipt_total はレシート全体の支払総額を整数で入れてください。
-receipt_date は購入日を YYYYMMDD の整数で入れてください。
 読めない場合は null にしてください。
 
 items には「商品名がある購入行」だけを入れてください。
@@ -86,7 +83,7 @@ num は個数を整数で入れてください。数量が明記されていな�
 amount は1個あたりの金額、つまり単価を整数で入れてください。
 total はその商品行の総額を整数で入れてください。
 単価と総額の片方しか読めない場合は、読めた方だけ入れて、読めない方は null にしてください。
-date は購入日を YYYYMMDD の整数で入れてください。読めない場合は receipt_date と同じ値にしてください。
+date は購入日を YYYYMMDD の整数で入れてください。
 ingredients は食材なら 1、食材でなければ 0、不明なら null にしてください。
 
 値引き専用行、クーポン行、ポイント行は商品ではないので items に入れないでください。
