@@ -11,6 +11,7 @@ MODEL = "gemma4:e4b"
 OLLAMA_URL = "http://localhost:11434/api/generate"
 app = FastAPI()
 
+# CORS設定
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -19,26 +20,48 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 返してほしい形は「商品だけ」
+# 返してほしい形は「商品明細 + レシート全体の総額」
 SCHEMA = {
     "type": "object",
     "properties": {
+        "receipt_total": {"type": ["integer", "null"]},
+        "receipt_date": {"type": ["integer", "null"]},
         "items": {
             "type": "array",
             "items": {
                 "type": "object",
                 "properties": {
-                    "name": {"type": ["string", "null"]},
-                    "qty": {"type": ["string", "null"]},
-                    "unit_price": {"type": ["string", "null"]},
-                    "amount": {"type": ["string", "null"]}
+                    "item": {"type": ["string", "null"]},
+                    "num": {"type": ["integer", "null"]},
+                    "amount": {"type": ["integer", "null"]},
+                    "total": {"type": ["integer", "null"]},
+                    "date": {"type": ["integer", "null"]},
+                    "ingredients": {"type": ["integer", "null"]}
                 },
-                "required": ["name", "qty", "unit_price", "amount"]
+                "required": ["item", "num", "amount", "total", "date", "ingredients"]
             }
         }
     },
-    "required": ["items"]
+    "required": ["receipt_total", "receipt_date", "items"]
 }
+
+# JSON形式の例
+"""
+    {
+    "receipt_total": 1234,
+    "receipt_date": 20260428,
+    "items": [
+        {
+        "item": "商品名",
+        "num": 1,
+        "amount": 100,
+        "total": 100,
+        "date": 20260428,
+        "ingredients": 1
+        }
+    ]
+    }
+"""
 
 PROMPT = """
 この画像はレシートの一部または全体です。
@@ -47,15 +70,24 @@ PROMPT = """
 必ず指定のJSONだけを返してください。
 説明文は不要です。
 
+トップレベルには receipt_total, receipt_date, items を入れてください。
+receipt_total はレシート全体の支払総額を整数で入れてください。
+receipt_date は購入日を YYYYMMDD の整数で入れてください。
+読めない場合は null にしてください。
+
 items には「商品名がある購入行」だけを入れてください。
 次の情報は items に入れないでください。
 店名、住所、電話番号、日時、レジ番号、担当者、会員情報、
 小計、税、合計、預り、釣り、支払方法、カード、現金、ポイント、注意書き。
 
-qty は画像に数量が明記されている場合だけ入れてください。
-unit_price は画像に単価が明記されている場合だけ入れてください。
-amount はその商品行の金額を入れてください。
-金額が1つしかない場合は amount に入れてください。
+各商品は item, num, amount, total, date, ingredients だけを返してください。
+item は商品名を入れてください。
+num は個数を整数で入れてください。数量が明記されていない場合は 1 にしてください。
+amount は1個あたりの金額、つまり単価を整数で入れてください。
+total はその商品行の総額を整数で入れてください。
+単価と総額の片方しか読めない場合は、読めた方だけ入れて、読めない方は null にしてください。
+date は購入日を YYYYMMDD の整数で入れてください。読めない場合は receipt_date と同じ値にしてください。
+ingredients は食材なら 1、食材でなければ 0、不明なら null にしてください。
 
 値引き専用行、クーポン行、ポイント行は商品ではないので items に入れないでください。
 読めない値は null にしてください。
@@ -90,7 +122,7 @@ async def read_upload_image(file: UploadFile) -> Image.Image:
         # 確認用
         print("ファイル名:", file.filename)
         print("タイプ:", file.content_type)
-        print("サイズ:", len(img))
+        print("サイズ:", len(contents))
 
         return img
     except Exception as exc:
@@ -149,28 +181,64 @@ def norm(v):
     v = " ".join(v.split())
     return v if v else None
 
+# 文字列や記号混じりの金額を整数に変換
+def to_int(v, default=None):
+    if v is None:
+        return default
+
+    if isinstance(v, int):
+        return v
+
+    text = str(v).strip()
+    if not text:
+        return default
+
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if not digits:
+        return default
+
+    return int(digits)
+
+
+def normalize_item(item, receipt_date=None):
+    num = to_int(item.get("num") or item.get("qty"), 1)
+    amount = to_int(item.get("amount") or item.get("unit_price"))
+    total = to_int(item.get("total"))
+
+    if total is None and num is not None and amount is not None:
+        total = num * amount
+
+    if amount is None and num not in (None, 0) and total is not None and total % num == 0:
+        amount = total // num
+
+    return {
+        "item": norm(item.get("item") or item.get("name")),
+        "num": num,
+        "amount": amount,
+        "total": total,
+        "date": to_int(item.get("date"), receipt_date),
+        "ingredients": to_int(item.get("ingredients"))
+    }
+
 # 重複した商品行の除去
-def dedupe_items(items):
+def dedupe_items(items, receipt_date=None):
     seen = set()
     result = []
 
     for item in items:
-        row = {
-            "name": norm(item.get("name")),
-            "qty": norm(item.get("qty")),
-            "unit_price": norm(item.get("unit_price")),
-            "amount": norm(item.get("amount"))
-        }
+        row = normalize_item(item, receipt_date)
 
         # 商品名も金額もない行は捨てる
-        if row["name"] is None and row["amount"] is None:
+        if row["item"] is None and row["total"] is None:
             continue
 
         key = (
-            row["name"],
-            row["qty"],
-            row["unit_price"],
-            row["amount"]
+            row["item"],
+            row["num"],
+            row["amount"],
+            row["total"],
+            row["date"],
+            row["ingredients"]
         )
 
         if key in seen:
@@ -181,6 +249,13 @@ def dedupe_items(items):
 
     return result
 
+def choose_receipt_value(values):
+    for value in reversed(values):
+        if value is not None:
+            return value
+
+    return None
+
 # 商品明細の抽出(OCR部分)
 def extract_items_from_image(img: Image.Image) -> dict:
     # 画像の補正
@@ -190,16 +265,24 @@ def extract_items_from_image(img: Image.Image) -> dict:
     parts = split_vertical(img, band_height=1400, overlap=220)
 
     all_items = []
+    receipt_totals = []
+    receipt_dates = []
 
     # AIへ分割画像を送信
     for idx, top, bottom, part in parts:
         image_b64 = image_to_b64(part)
         data = call_model(image_b64)
         all_items.extend(data.get("items", []))
+        receipt_totals.append(to_int(data.get("receipt_total")))
+        receipt_dates.append(to_int(data.get("receipt_date")))
 
-    # 重複を除去した商品明細を返却
+    receipt_total = choose_receipt_value(receipt_totals)
+    receipt_date = choose_receipt_value(receipt_dates)
+
+    # 重複を除去した商品明細とレシート全体の総額を返却
     return {
-        "items": dedupe_items(all_items)
+        "receipt_total": receipt_total,
+        "items": dedupe_items(all_items, receipt_date)
     }
 
 # APIエンドポイント
