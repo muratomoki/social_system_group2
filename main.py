@@ -3,10 +3,21 @@ import json
 import requests
 from io import BytesIO
 from PIL import Image, ImageOps, ImageFilter
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from starlette.concurrency import run_in_threadpool
 
-IMAGE_PATH = "receipt.webp"
 MODEL = "gemma4:e4b"
 OLLAMA_URL = "http://localhost:11434/api/generate"
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # 返してほしい形は「商品だけ」
 SCHEMA = {
@@ -52,14 +63,40 @@ amount はその商品行の金額を入れてください。
 同じ商品が別の画像にも見えても、そのまま返してください。
 """
 
-def preprocess_image(path: str) -> Image.Image:
-    img = Image.open(path).convert("L")
+# 画像の前処理
+def preprocess_image(img: Image.Image) -> Image.Image:
+    # 白黒画像化
+    img = img.convert("L")
+    # 明暗差の自動調整
     img = ImageOps.autocontrast(img)
+    # 画像拡大
     w, h = img.size
     img = img.resize((w * 2, h * 2))
+    # シャープ化
     img = img.filter(ImageFilter.SHARPEN)
     return img
 
+# アップロード画像の読み込み
+async def read_upload_image(file: UploadFile) -> Image.Image:
+    # 画像かどうかの判定
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="画像ファイルをアップロードしてください")
+
+    try:
+        # (非同期処理)ファイル読み込み
+        contents = await file.read()
+        img = Image.open(BytesIO(contents))
+        img.load()
+        # 確認用
+        print("ファイル名:", file.filename)
+        print("タイプ:", file.content_type)
+        print("サイズ:", len(img))
+
+        return img
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="画像ファイルを読み込めませんでした") from exc
+
+# 長いレシートの分割処理(1400px, overlap:220px)
 def split_vertical(img: Image.Image, band_height: int = 1400, overlap: int = 220):
     w, h = img.size
     parts = []
@@ -79,21 +116,26 @@ def split_vertical(img: Image.Image, band_height: int = 1400, overlap: int = 220
 
     return parts
 
+# 画像のBase64化
 def image_to_b64(img: Image.Image) -> str:
     buf = BytesIO()
+    # PNG形式で保存
     img.save(buf, format="PNG")
+    # Base64文字列に変換
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
+# Ollama呼び出し
 def call_model(image_b64: str) -> dict:
     payload = {
-        "model": MODEL,
-        "prompt": PROMPT,
-        "images": [image_b64],
-        "format": SCHEMA,
-        "stream": False,
-        "think": False
+        "model": MODEL, # モデル名
+        "prompt": PROMPT,   # プロンプト
+        "images": [image_b64],  # Base64画像配列
+        "format": SCHEMA,   # JSON形式指定
+        "stream": False,    # 返答はまとめて
+        "think": False  # 思考過程なし
     }
 
+    # OllamaへのPOSTリクエスト
     r = requests.post(OLLAMA_URL, json=payload, timeout=600)
     r.raise_for_status()
 
@@ -107,6 +149,7 @@ def norm(v):
     v = " ".join(v.split())
     return v if v else None
 
+# 重複した商品行の除去
 def dedupe_items(items):
     seen = set()
     result = []
@@ -138,27 +181,41 @@ def dedupe_items(items):
 
     return result
 
-def main():
-    img = preprocess_image(IMAGE_PATH)
+# 商品明細の抽出(OCR部分)
+def extract_items_from_image(img: Image.Image) -> dict:
+    # 画像の補正
+    img = preprocess_image(img)
 
     # 長いレシートでも読みやすいように縦分割
     parts = split_vertical(img, band_height=1400, overlap=220)
 
     all_items = []
 
+    # AIへ分割画像を送信
     for idx, top, bottom, part in parts:
         image_b64 = image_to_b64(part)
         data = call_model(image_b64)
         all_items.extend(data.get("items", []))
 
-    final_data = {
+    # 重複を除去した商品明細を返却
+    return {
         "items": dedupe_items(all_items)
     }
 
-    with open("items_only.json", "w", encoding="utf-8") as f:
-        json.dump(final_data, f, ensure_ascii=False, indent=2)
+# APIエンドポイント
+@app.post("/receipt/items") # POST/receipt/items
+async def receipt_items(file: UploadFile = File(...)):
+    # アップロード画像の読み込み
+    img = await read_upload_image(file)
+    # 別スレッドでOCR処理の実行
+    return await run_in_threadpool(extract_items_from_image, img)
 
-    print(json.dumps(final_data, ensure_ascii=False, indent=2))
+# 起動処理
+def main():
+    import uvicorn
+
+    # FastAPIを動かす(appをポート8000で起動)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000)
 
 if __name__ == "__main__":
     main()
